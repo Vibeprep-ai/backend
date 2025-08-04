@@ -4,8 +4,8 @@ from typing import List
 import os
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
+
 
 class EmailSchema(BaseModel):
     email: List[EmailStr]
@@ -13,7 +13,6 @@ class EmailSchema(BaseModel):
     body: str
 
 
-# Configure FastMail with environment variables
 try:
     conf = ConnectionConfig(
         MAIL_USERNAME=os.getenv("MAIL_USERNAME"),

@@ -4,8 +4,10 @@ from datetime import datetime
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure
 import os
+import json
 from dotenv import load_dotenv
 from urllib.parse import quote_plus
+from pydantic import BaseModel, Field
 
 from .schema import (
     SlotUpdate, SlotResponse, SlotCreateResponse, SlotUpdateResponse, 
@@ -13,6 +15,8 @@ from .schema import (
     ErrorResponse, TaskUpdate, TaskAssignResponse, SimpleSlotUpdate,
     Task, SlotWithTask, TaskSearchResponse, CalendarDocument
 )
+
+from .agent import optimize_with_prompt, OptimizedSchedule
 
 load_dotenv()
 
@@ -35,9 +39,18 @@ class MongoDB:
 
 mongodb = MongoDB()
 
+class ScheduleOptimizationRequest(BaseModel):
+    user_prompt: str = Field(..., description="User's optimization request", example="Help me balance my study schedule better")
+    input_data: Dict[str, Any] = Field(..., description="JSON data containing schedule, psychometric insights, and progress reports")
+
+class ScheduleOptimizationResponse(BaseModel):
+    success: bool = Field(..., description="Whether optimization was successful")
+    optimized_schedule: OptimizedSchedule = Field(..., description="The optimized schedule")
+    message: str = Field(..., description="Response message")
+
 def connect_to_mongo():
     try:
-        print(f"🔄 Connecting to MongoDB...")
+        print(f"Connecting to MongoDB...")
         mongodb.client = MongoClient(
             MONGODB_URL,
             serverSelectionTimeoutMS=5000,
@@ -64,7 +77,7 @@ def connect_to_mongo():
 def close_mongo_connection():
     if mongodb.client:
         mongodb.client.close()
-        print("📤 Disconnected from MongoDB")
+        print("Disconnected from MongoDB")
 
 def get_database():
     if mongodb.database is None:
@@ -129,15 +142,93 @@ def upsert_calendar_document(
         upsert=True
     )
 
-# Health check endpoint for MongoDB
+@router.post(
+    "/optimize-schedule",
+    response_model=ScheduleOptimizationResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid input data"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    }
+)
+def optimize_schedule(request: ScheduleOptimizationRequest) -> ScheduleOptimizationResponse:
+    """
+    Optimize a student's schedule using AI agent based on psychometric insights and progress reports.
+    
+    Expected input_data format:
+    {
+        "user_id": "student_123",
+        "target_dates": ["2025-08-05", "2025-08-06"],
+        "current_schedule": {
+            "2025-08-05": [
+                {
+                    "time_slot": "09:00-10:00",
+                    "task": {
+                        "task_id": "task_001",
+                        "title": "Math Practice",
+                        "subject": "Mathematics",
+                        "priority": "high"
+                    }
+                }
+            ]
+        },
+        "psychometric_insights": {
+            "personality_type": "INTJ",
+            "learning_style": "visual",
+            "focus_duration": 45,
+            "peak_hours": ["09:00-11:00"],
+            "energy_level": "morning",
+            "stress_tolerance": "medium",
+            "break_frequency": 25
+        },
+        "progress_reports": [
+            {
+                "subject": "Mathematics",
+                "current_score": 75.0,
+                "target_score": 85.0,
+                "weak_areas": ["calculus"],
+                "strong_areas": ["algebra"],
+                "time_spent_last_week": 8,
+                "completion_rate": 70.0
+            }
+        ],
+        "available_tasks": [
+            {
+                "task_id": "task_002",
+                "title": "Physics Study",
+                "subject": "Physics",
+                "priority": "medium",
+                "difficulty": "medium",
+                "estimated_duration": 60
+            }
+        ]
+    }
+    """
+    try:
+        input_data_json = json.dumps(request.input_data)        
+        optimized_schedule = optimize_with_prompt(request.user_prompt, input_data_json)
+        return ScheduleOptimizationResponse(
+            success=True,
+            optimized_schedule=optimized_schedule,
+            message="Schedule optimized successfully using AI agent"
+        )
+        
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid input data: {str(ve)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error optimizing schedule: {str(e)}"
+        )
+
 @router.get("/health")
 def health_check():
-    """Health check endpoint for MongoDB connection"""
     try:
         if mongodb.database is None:
             return {"status": "error", "message": "Database not connected"}
         
-        # Try to ping the database
         mongodb.client.admin.command('ping')
         return {
             "status": "healthy", 
@@ -150,7 +241,6 @@ def health_check():
             "message": f"Database connection failed: {str(e)}"
         }
 
-# GET endpoint - Get slots with tasks for a given day
 @router.get(
     "/slots/{user_id}/{year}/{month}/{date}",
     response_model=SlotResponse,
@@ -180,9 +270,7 @@ def get_slots(
             )
         
         raw_slots = doc.get("slots", [])
-        slots = convert_legacy_slots(raw_slots)
-        
-        # Filter out empty slots
+        slots = convert_legacy_slots(raw_slots)        
         non_empty_slots = [slot for slot in slots if slot.time_slot.strip()]
         
         return SlotResponse(
@@ -199,7 +287,6 @@ def get_slots(
             detail=f"Error retrieving slots: {str(e)}"
         )
 
-# POST endpoint - Create/Add slots with tasks for a date
 @router.post(
     "/slots/{user_id}/{year}/{month}/{date}",
     response_model=SlotCreateResponse,
