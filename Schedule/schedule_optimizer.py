@@ -186,9 +186,99 @@ In the 'excluded_changes' field, list the descriptions of changes that were NOT 
         prompt = self.create_final_schedule_prompt()
         response = self.schedule_agent.run(prompt).content
         return response
-
-
-# Sample data
+    
+    def convert_schedule_to_db_format(self, optimized_schedule: OptimizedSchema) -> Dict[str, Any]:
+        """
+        Convert the optimized schedule response into MongoDB-ready format.
+        
+        Args:
+            optimized_schedule: The OptimizedSchema object from generate_final_schedule()
+            
+        Returns:
+            Dictionary in the format matching the database schema
+        """
+        schedule_text = optimized_schedule.optimized_schedule
+        
+        # Parse the schedule text to extract day-wise schedules
+        days_schedule = []
+        current_day = None
+        current_activities = []
+        
+        lines = schedule_text.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Check if this is a day header (e.g., "MONDAY:", "TUESDAY:")
+            day_names = ['MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY']
+            is_day_header = any(line.upper().startswith(day) for day in day_names)
+            
+            if is_day_header:
+                # Save previous day if exists
+                if current_day and current_activities:
+                    days_schedule.append({
+                        "day": current_day,
+                        "schedule": current_activities
+                    })
+                
+                # Start new day
+                current_day = line.rstrip(':').strip()
+                current_activities = []
+                
+            elif line.startswith('-') and ':' in line:
+                # This is a schedule entry (e.g., "- 5:45-7:00 AM: Activity")
+                parts = line[1:].strip().split(':', 1)  # Remove '-' and split on first ':'
+                
+                if len(parts) >= 2:
+                    time_slot = parts[0].strip()
+                    activity_description = parts[1].strip()
+                    
+                    # Try to extract subject focus from activity description
+                    subject_focus = "-"
+                    tips = ""
+                    
+                    # Simple heuristic: if activity contains subject names
+                    activity_lower = activity_description.lower()
+                    if any(subj in activity_lower for subj in ['physics', 'chemistry', 'mathematics', 'maths']):
+                        if 'physics' in activity_lower:
+                            subject_focus = "Physics"
+                        elif 'chemistry' in activity_lower:
+                            subject_focus = "Chemistry"
+                        elif 'math' in activity_lower:
+                            subject_focus = "Mathematics"
+                    
+                    current_activities.append({
+                        "time_slot": time_slot,
+                        "activity": activity_description,
+                        "subject_focus": subject_focus,
+                        "tips": tips
+                    })
+        
+        # Don't forget the last day
+        if current_day and current_activities:
+            days_schedule.append({
+                "day": current_day,
+                "schedule": current_activities
+            })
+        
+        # Create the final database document
+        from datetime import datetime
+        db_document = {
+            "category": "Optimized Schedule",
+            "student_name": self.student_data.get('name', 'Unknown Student'),
+            "target_exam": self.student_data.get('target_exam', 'JEE Advanced'),
+            "description": optimized_schedule.rationale,
+            "days_schedule": days_schedule,
+            "included_changes": optimized_schedule.included_changes,
+            "excluded_changes": optimized_schedule.excluded_changes,
+            "key_recommendations": optimized_schedule.key_recommendations,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        return db_document
+    
 def get_sample_student_data():
     return {
         "name": "Rahul Sharma",
@@ -320,7 +410,7 @@ SUNDAY:
 """
 
 
-def main():
+def pipeline():
     
     print("\n" + "=" * 80)
     print("INTERACTIVE SCHEDULE OPTIMIZER FOR COMPETITIVE EXAM PREPARATION")
@@ -461,15 +551,38 @@ def main():
     
     print("\n" + "=" * 80)
     print("✓ OPTIMIZATION COMPLETE!")
-    print("=" * 80)
-    print("\nYour personalized study schedule is ready.")
-    print("Remember: Consistency is key to success in competitive exams!")
     print("=" * 80 + "\n")
     
-    return optimizer, proposed_changes, final_schedule
+    if final_schedule:
+        print("\n" + "=" * 80)
+        print("CONVERTING TO DATABASE FORMAT")
+        print("=" * 80)
+        
+        try:
+            db_document = optimizer.convert_schedule_to_db_format(final_schedule)
+            
+            import json
+            print("\nFormatted Database Document:")
+            print(json.dumps(db_document, indent=2))
+            
+            print("\n" + "=" * 80)
+            print("✓ FORMATTING COMPLETE!")
+            print("=" * 80 + "\n")
+            
+        except Exception as e:
+            print(f"\n✗ Failed to format: {e}")
+        print("=" * 80)
+        for i, change in enumerate(final_schedule.excluded_changes, 1):
+            print(f"  {i}. {change}")
+    
+    print("\n" + "=" * 80)
+    print("KEY RECOMMENDATIONS")
+    print("=" * 80)
+    for i, rec in enumerate(final_schedule.key_recommendations, 1):
+        print(f"  {i}. {rec}")
 
 
+    print("\n" + "=" * 80)
+    
 if __name__ == "__main__":
-    main()
-
-
+    pipeline()
