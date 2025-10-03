@@ -4,9 +4,22 @@ from dotenv import load_dotenv
 from agno.tools.tavily import TavilyTools
 from agno.tools.reasoning import ReasoningTools
 from pydantic import BaseModel, Field
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 load_dotenv()
+
+class ProposedChange(BaseModel):
+    change_id: int = Field(..., description="Unique identifier for the change")
+    category: str = Field(..., description="Category of change (e.g., 'sleep', 'break', 'study_time', 'weak_topics', 'stress_management')")
+    description: str = Field(..., description="Detailed description of the proposed change")
+    reason: str = Field(..., description="Why this change is being proposed")
+    impact: str = Field(..., description="Expected impact on exam preparation")
+
+
+class ProposedChangesSchema(BaseModel):
+    proposed_changes: List[ProposedChange] = Field(..., description="List of all proposed changes to the schedule")
+    summary: str = Field(..., description="Overall summary of the optimization strategy")
+
 
 class OptimizedSchema(BaseModel):
     optimized_schedule: str = Field(..., description="Complete optimized weekly schedule with day-wise time slots and activities")
@@ -18,24 +31,36 @@ class OptimizedSchema(BaseModel):
 
 class ScheduleOptimizer:
     def __init__(self):
-        self.agent = Agent(
+        self.changes_agent = Agent(
             model=Gemini(id="gemini-2.0-flash"),
             description="""
                 You are an expert schedule optimizer specialized in helping students prepare for competitive exams like JEE, NEET, UPSC, CAT, and other similar entrance tests.
                 
-                Your task is to analyze a student's existing schedule and create a completely NEW OPTIMIZED SCHEDULE for maximum effectiveness in exam preparation by:
+                Your task is to analyze a student's existing schedule and PROPOSE specific changes for optimization. Each change should be clear, actionable, and justified.
                 
-                1. Balancing study time across different subjects based on syllabus weightage and student's proficiency
-                2. Incorporating regular breaks to prevent burnout and improve retention
-                3. Allocating time for revision, practice tests, and solving previous years' papers
-                4. Suggesting optimal study techniques based on subject matter (e.g., active recall for theory, timed practice for numerical problems)
-                5. Integrating spaced repetition for difficult topics
-                6. Creating a sustainable long-term schedule that accounts for the student's other commitments
-                7. Prioritizing weak topics while maintaining strong topics
+                Focus on:
+                1. Identifying specific time slots that need modification
+                2. Proposing concrete changes (e.g., "Change sleep time from 11 PM-6 AM to 10 PM-6 AM")
+                3. Explaining why each change will help exam preparation
+                4. Categorizing changes for easy understanding
                 
-                IMPORTANT: You must provide a COMPLETE NEW WEEKLY SCHEDULE in the 'optimized_schedule' field with all 7 days (Monday to Sunday) showing exact time slots and activities.
+                Be specific and practical in your proposals.
+            """,
+            tools=[TavilyTools(), ReasoningTools()],
+            output_schema=ProposedChangesSchema,
+            markdown=True
+        )
+        
+        self.schedule_agent = Agent(
+            model=Gemini(id="gemini-2.0-flash"),
+            description="""
+                You are an expert schedule optimizer specialized in helping students prepare for competitive exams like JEE, NEET, UPSC, CAT, and other similar entrance tests.
                 
-                When optimizing, prioritize evidence-based learning strategies, proper time management, and personalized approaches based on the student's strengths and weaknesses. Your goal is to create a balanced, effective, and sustainable study plan that maximizes exam performance.
+                Your task is to create a COMPLETE NEW OPTIMIZED SCHEDULE based on the selected changes provided by the user.
+                
+                IMPORTANT: You must provide a COMPLETE WEEKLY SCHEDULE in the 'optimized_schedule' field with all 7 days (Monday to Sunday) showing exact time slots and activities.
+                
+                When creating the schedule, prioritize evidence-based learning strategies, proper time management, and personalized approaches based on the student's strengths and weaknesses.
             """,
             tools=[TavilyTools(), ReasoningTools()],
             output_schema=OptimizedSchema,
@@ -44,6 +69,8 @@ class ScheduleOptimizer:
         
         self.student_data = None
         self.current_schedule = None
+        self.proposed_changes = None
+        self.selected_changes = []
     
     def load_student_data(self, data: Dict[str, Any]):
         self.student_data = data
@@ -51,9 +78,9 @@ class ScheduleOptimizer:
     def load_current_schedule(self, schedule: str):
         self.current_schedule = schedule
     
-    def create_optimization_prompt(self) -> str:
+    def create_changes_proposal_prompt(self) -> str:
         return f"""
-Please create a COMPLETE OPTIMIZED WEEKLY SCHEDULE for a JEE Advanced aspirant.
+Analyze the following JEE Advanced student's schedule and propose specific changes for optimization.
 
 STUDENT PSYCHOMETRIC DATA:
 {self.student_data}
@@ -70,21 +97,71 @@ CONCERNS IDENTIFIED:
 6. Limited time for previous year papers
 7. Late night social media usage affecting sleep
 
-OPTIMIZATION REQUIREMENTS:
-- Address the weak topics identified: {self.student_data['psychometric_profile']['weak_topics']}
-- Ensure adequate sleep (7-8 hours)
-- Incorporate stress management and meditation/yoga sessions
-- Use spaced repetition for retention
-- Allocate more time to Physics (65%) and Mathematics (72%) compared to Chemistry (78%)
-- Include regular 5-10 minute breaks between study sessions
-- Include mental health activities and physical exercise
-- Optimize study sessions during peak productivity hours: {self.student_data['psychometric_profile']['peak_productivity_hours']}
-- Respect attention span of {self.student_data['psychometric_profile']['attention_span_minutes']} minutes per session
-- Include daily revision slots
-- Dedicate specific slots for weak topic practice
-- Include weekly mock tests and analysis
+Please propose specific, actionable changes. Each change should:
+- Have a unique ID
+- Be categorized (sleep, breaks, study_time, weak_topics, stress_management, revision, etc.)
+- Include a clear description of what to change
+- Explain why this change is beneficial
+- Describe the expected impact
 
-IMPORTANT: In the 'optimized_schedule' field, provide a COMPLETE day-by-day schedule for the entire week (Monday through Sunday) with exact time slots and activities. Format it clearly like:
+Consider:
+- Weak topics: {self.student_data['psychometric_profile']['weak_topics']}
+- Peak productivity: {self.student_data['psychometric_profile']['peak_productivity_hours']}
+- Attention span: {self.student_data['psychometric_profile']['attention_span_minutes']} minutes
+- Subject proficiency: Physics (65%), Chemistry (78%), Mathematics (72%)
+
+Propose 10-15 specific changes that the student can choose from.
+"""
+    
+    def get_proposed_changes(self) -> ProposedChangesSchema:
+        if not self.student_data or not self.current_schedule:
+            raise ValueError("Please load student data and current schedule first")
+        
+        prompt = self.create_changes_proposal_prompt()
+        response = self.changes_agent.run(prompt).content
+        self.proposed_changes = response
+        return response
+    
+    def select_changes_programmatic(self, change_ids: List[int]):
+        valid_ids = [c.change_id for c in self.proposed_changes.proposed_changes]
+        invalid_ids = [id for id in change_ids if id not in valid_ids]
+        
+        if invalid_ids:
+            raise ValueError(f"Invalid change IDs: {invalid_ids}")
+        
+        self.selected_changes = change_ids
+    
+    def create_final_schedule_prompt(self) -> str:
+        selected_change_details = [
+            c for c in self.proposed_changes.proposed_changes 
+            if c.change_id in self.selected_changes
+        ]
+        
+        excluded_change_details = [
+            c for c in self.proposed_changes.proposed_changes 
+            if c.change_id not in self.selected_changes
+        ]
+        
+        return f"""
+Create a COMPLETE OPTIMIZED WEEKLY SCHEDULE for a JEE Advanced aspirant based on the selected changes.
+
+STUDENT PSYCHOMETRIC DATA:
+{self.student_data}
+
+CURRENT WEEKLY SCHEDULE:
+{self.current_schedule}
+
+SELECTED CHANGES TO IMPLEMENT:
+{[f"ID {c.change_id}: {c.description}" for c in selected_change_details]}
+
+EXCLUDED CHANGES (DO NOT IMPLEMENT):
+{[f"ID {c.change_id}: {c.description}" for c in excluded_change_details]}
+
+IMPORTANT: 
+1. In the 'optimized_schedule' field, provide a COMPLETE day-by-day schedule for the entire week (Monday through Sunday) with exact time slots and activities.
+2. ONLY implement the selected changes listed above.
+3. Keep other aspects of the schedule similar to the current one unless modified by selected changes.
+4. Format clearly like:
 
 MONDAY:
 - 5:30-6:30 AM: Activity
@@ -97,48 +174,18 @@ TUESDAY:
 ... (continue for all 7 days)
 
 Make sure to include all activities: study sessions, breaks, meals, sleep, exercise, revision, tests, etc.
+
+In the 'included_changes' field, list the descriptions of changes that were implemented.
+In the 'excluded_changes' field, list the descriptions of changes that were NOT implemented (user rejected).
 """
     
-    def optimize_schedule(self) -> OptimizedSchema:
-        """Run the schedule optimization"""
-        if not self.student_data or not self.current_schedule:
-            raise ValueError("Please load student data and current schedule first")
+    def generate_final_schedule(self) -> OptimizedSchema:
+        if not self.selected_changes:
+            raise ValueError("Please select changes first")
         
-        prompt = self.create_optimization_prompt()
-        response = self.agent.run(prompt).content
+        prompt = self.create_final_schedule_prompt()
+        response = self.schedule_agent.run(prompt).content
         return response
-    
-    def print_results(self, response: OptimizedSchema):
-        """Print the optimization results in a formatted way"""
-        print("\n" + "=" * 80)
-        print("OPTIMIZED WEEKLY SCHEDULE")
-        print("=" * 80)
-        print(f"\n{response.optimized_schedule}\n")
-        
-        print("\n" + "=" * 80)
-        print("RATIONALE")
-        print("=" * 80)
-        print(f"\n{response.rationale}\n")
-        
-        print("\n" + "=" * 80)
-        print("CHANGES INCLUDED")
-        print("=" * 80)
-        for i, change in enumerate(response.included_changes, 1):
-            print(f"{i}. {change}")
-        
-        print("\n" + "=" * 80)
-        print("CHANGES EXCLUDED")
-        print("=" * 80)
-        for i, change in enumerate(response.excluded_changes, 1):
-            print(f"{i}. {change}")
-        
-        print("\n" + "=" * 80)
-        print("KEY RECOMMENDATIONS")
-        print("=" * 80)
-        for i, rec in enumerate(response.key_recommendations, 1):
-            print(f"{i}. {rec}")
-        
-        print("\n" + "=" * 80)
 
 
 # Sample data
@@ -273,25 +320,156 @@ SUNDAY:
 """
 
 
-if __name__ == "__main__":
-    print("=" * 80)
-    print("SCHEDULE OPTIMIZATION FOR JEE PREPARATION")
-    print("=" * 80)
-    print("\nInitializing Schedule Optimizer...\n")
+def main():
     
-    # Create optimizer instance
+    print("\n" + "=" * 80)
+    print("INTERACTIVE SCHEDULE OPTIMIZER FOR COMPETITIVE EXAM PREPARATION")
+    print("=" * 80)
+    
+
     optimizer = ScheduleOptimizer()
     
-    # Load data
-    optimizer.load_student_data(get_sample_student_data())
-    optimizer.load_current_schedule(get_sample_current_schedule())
+    student_data = get_sample_student_data()
+    current_schedule = get_sample_current_schedule()
     
-    print("Processing optimization request...\n")
+    optimizer.load_student_data(student_data)
+    optimizer.load_current_schedule(current_schedule)
     
-    # Run optimization
-    response = optimizer.optimize_schedule()
+    print(f"\nStudent: {student_data['name']}")
+    print(f"Target Exam: {student_data['target_exam']}")
+    print(f"Current Preparation Level: {student_data['current_preparation_level']}")
     
-    # Print results
-    optimizer.print_results(response)
+    print("\n" + "=" * 80)
+    print("STEP 1: ANALYZING YOUR SCHEDULE")
+    print("=" * 80)
+    print("\nPlease wait while we analyze your schedule and propose optimizations...")
+    
+    proposed_changes = optimizer.get_proposed_changes()
+    
+    print(f"\n✓ Analysis Complete!")
+    print(f"\nSummary: {proposed_changes.summary}")
+    print(f"\nWe have identified {len(proposed_changes.proposed_changes)} potential improvements.")
+    
+    print("\n" + "=" * 80)
+    print("STEP 2: PROPOSED CHANGES")
+    print("=" * 80)
+    
+    for change in proposed_changes.proposed_changes:
+        print(f"\n┌─ Change ID: [{change.change_id}]")
+        print(f"│  Category: {change.category.upper()}")
+        print(f"│  Description: {change.description}")
+        print(f"│  Reason: {change.reason}")
+        print(f"│  Expected Impact: {change.impact}")
+        print("└" + "─" * 78)
+    
+    print("\n" + "=" * 80)
+    print("STEP 3: SELECT CHANGES TO APPLY")
+    print("=" * 80)
+    
+    all_ids = [c.change_id for c in proposed_changes.proposed_changes]
+    print(f"\nAvailable Change IDs: {', '.join(map(str, all_ids))}")
+    print("\nOptions:")
+    print("  1. Enter specific IDs (e.g., 1,2,3,5,7)")
+    print("  2. Type 'all' to accept all changes")
+    print("  3. Type 'none' to reject all changes and exit")
+    
+    while True:
+        try:
+            user_input = input("\nYour selection: ").strip().lower()
+            
+            if user_input == 'none':
+                print("\nNo changes selected. Exiting...")
+                return None, proposed_changes, None
+            
+            elif user_input == 'all':
+                selected_ids = all_ids
+                print(f"\n✓ Selected all {len(selected_ids)} changes")
+                break
+            
+            else:
+                selected_ids = [int(x.strip()) for x in user_input.split(',')]
+                
+                # Validate IDs
+                invalid_ids = [id for id in selected_ids if id not in all_ids]
+                if invalid_ids:
+                    print(f"\n✗ Invalid IDs: {invalid_ids}")
+                    print(f"  Please enter IDs from: {', '.join(map(str, all_ids))}")
+                    continue
+                
+                print(f"\n✓ Selected {len(selected_ids)} changes: {selected_ids}")
+                break
+                
+        except ValueError:
+            print("\n✗ Invalid input. Please enter comma-separated numbers, 'all', or 'none'")
+            continue
+    
+    print("\n" + "=" * 80)
+    print("CHANGES TO BE IMPLEMENTED")
+    print("=" * 80)
+    
+    selected_changes = [c for c in proposed_changes.proposed_changes if c.change_id in selected_ids]
+    for change in selected_changes:
+        print(f"  ✓ [{change.change_id}] {change.description}")
+    
+    excluded_changes = [c for c in proposed_changes.proposed_changes if c.change_id not in selected_ids]
+    if excluded_changes:
+        print("\n" + "=" * 80)
+        print("CHANGES NOT IMPLEMENTED")
+        print("=" * 80)
+        for change in excluded_changes:
+            print(f"  ✗ [{change.change_id}] {change.description}")
+  
+    
+    print("\n" + "=" * 80)
+    print("STEP 4: GENERATING OPTIMIZED SCHEDULE")
+    print("=" * 80)
+    print("\nPlease wait while we create your personalized schedule...")
+    
+    optimizer.select_changes_programmatic(selected_ids)
+    final_schedule = optimizer.generate_final_schedule()
+    
+    print("\n✓ Schedule Generated Successfully!")
+    
+    print("\n" + "=" * 80)
+    print("YOUR OPTIMIZED WEEKLY SCHEDULE")
+    print("=" * 80)
+    print(f"\n{final_schedule.optimized_schedule}\n")
+    
+    print("\n" + "=" * 80)
+    print("OPTIMIZATION RATIONALE")
+    print("=" * 80)
+    print(f"\n{final_schedule.rationale}\n")
+    
+    print("\n" + "=" * 80)
+    print(f"IMPLEMENTED CHANGES ({len(final_schedule.included_changes)})")
+    print("=" * 80)
+    for i, change in enumerate(final_schedule.included_changes, 1):
+        print(f"  {i}. {change}")
+    
+    if final_schedule.excluded_changes:
+        print("\n" + "=" * 80)
+        print(f"EXCLUDED CHANGES ({len(final_schedule.excluded_changes)})")
+        print("=" * 80)
+        for i, change in enumerate(final_schedule.excluded_changes, 1):
+            print(f"  {i}. {change}")
+    
+    print("\n" + "=" * 80)
+    print("KEY RECOMMENDATIONS")
+    print("=" * 80)
+    for i, rec in enumerate(final_schedule.key_recommendations, 1):
+        print(f"  {i}. {rec}")
+    
+    print("\n" + "=" * 80)
+    print("✓ OPTIMIZATION COMPLETE!")
+    print("=" * 80)
+    print("\nYour personalized study schedule is ready.")
+    print("Remember: Consistency is key to success in competitive exams!")
+    print("=" * 80 + "\n")
+    
+    return optimizer, proposed_changes, final_schedule
+
+
+if __name__ == "__main__":
+    main()
 
 
